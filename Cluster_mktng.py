@@ -8,10 +8,25 @@ from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Function to load and preprocess data
 @st.cache_data
 def load_and_preprocess_data(file):
-    df = pd.read_csv(file)
+    # Try different delimiters, including space
+ 
+    df = pd.read_csv(file, delimiter=';', engine='python')
+  
+    st.write("Data Preview:")
+    st.write(df.head())
+    
+    st.write("Column Data Types:")
+    st.write(df.dtypes)
+    
+    # Convert columns to numeric where possible
+    for col in df.columns:
+        try:
+            df[col] = pd.to_numeric(df[col], errors='raise')
+        except:
+            pass  # If conversion fails, leave the column as is
+    
     numeric_columns = df.select_dtypes(include=[np.number]).columns
     
     if len(numeric_columns) == 0:
@@ -29,7 +44,22 @@ def load_and_preprocess_data(file):
     X_scaled = scaler.fit_transform(X)
     return X_scaled, df, numeric_columns
 
-# Function to perform clustering
+# New function to perform elbow method for K-means
+def elbow_method(X):
+    wcss = []
+    for i in range(1, 11):
+        kmeans = KMeans(n_clusters=i, init='k-means++', random_state=42)
+        kmeans.fit(X)
+        wcss.append(kmeans.inertia_)
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(range(1, 11), wcss)
+    ax.set_title('Elbow Method')
+    ax.set_xlabel('Number of clusters')
+    ax.set_ylabel('WCSS')
+    return fig
+
+# Modified perform_clustering function
 def perform_clustering(X, algorithm, n_clusters=5):
     if algorithm == 'K-means':
         model = KMeans(n_clusters=n_clusters, random_state=42)
@@ -43,7 +73,7 @@ def perform_clustering(X, algorithm, n_clusters=5):
         model = MeanShift()
     
     labels = model.fit_predict(X)
-    return labels
+    return labels, model
 
 # Function to plot clusters in 2D
 def plot_clusters_2d(X, labels, title):
@@ -72,7 +102,6 @@ def plot_feature_importance(X, labels, feature_names, title):
     
     return fig
 
-# Main Streamlit app
 def main():
     st.title('Advanced Clustering Analysis')
     
@@ -91,13 +120,19 @@ def main():
             ('K-means', 'Hierarchical', 'DBSCAN', 'GMM', 'Mean Shift')
         )
         
+        if algorithm == 'K-means':
+            st.write("Elbow Method for K-means:")
+            elbow_fig = elbow_method(X)
+            st.pyplot(elbow_fig)
+            st.write("Use the Elbow Method graph to choose the optimal number of clusters where the 'elbow' occurs.")
+        
         if algorithm in ['K-means', 'Hierarchical', 'GMM']:
             n_clusters = st.slider("Number of Clusters", 2, 10, 5)
         else:
             n_clusters = None
         
         if st.button('Run Clustering Analysis'):
-            labels = perform_clustering(X, algorithm, n_clusters)
+            labels, model = perform_clustering(X, algorithm, n_clusters)
             
             st.write(f"\n{algorithm} Clustering Results:")
             
