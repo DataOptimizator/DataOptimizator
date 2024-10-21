@@ -1,50 +1,89 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, FunctionTransformer
+from sklearn.impute import SimpleImputer
 from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN, MeanShift
 from sklearn.mixture import GaussianMixture
-from sklearn.decomposition import PCA
+from sklearn.decomposition import TruncatedSVD
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 import matplotlib.pyplot as plt
 import seaborn as sns
+import plotly.graph_objs as go
+import plotly.express as px
+
 
 @st.cache_data
 def load_and_preprocess_data(file):
-    # Try different delimiters, including space
- 
     df = pd.read_csv(file, delimiter=';', engine='python')
-  
+    
     st.write("Data Preview:")
     st.write(df.head())
     
     st.write("Column Data Types:")
     st.write(df.dtypes)
     
-    # Convert columns to numeric where possible
-    for col in df.columns:
-        try:
-            df[col] = pd.to_numeric(df[col], errors='raise')
-        except:
-            pass  # If conversion fails, leave the column as is
+    # Identify numeric and categorical columns
+    numeric_columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_columns = df.select_dtypes(exclude=[np.number]).columns.tolist()
     
-    numeric_columns = df.select_dtypes(include=[np.number]).columns
-    
-    if len(numeric_columns) == 0:
-        st.error("The uploaded file does not contain any numeric columns. Please upload a file with numeric data for clustering.")
+    if len(numeric_columns) == 0 and len(categorical_columns) == 0:
+        st.error("The uploaded file does not contain any valid columns for analysis. Please check your data.")
         return None, None, None
     
-    X = df[numeric_columns]
-    X = X.fillna(X.mean())
-    
-    if X.empty:
-        st.error("After preprocessing, no valid numeric data remains. Please check your data and try again.")
-        return None, None, None
-    
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    return X_scaled, df, numeric_columns
+    return df, numeric_columns, categorical_columns
 
-# New function to perform elbow method for K-means
+
+def preprocess_data(df, selected_numeric, selected_categorical):
+    # Combine selected columns
+    selected_columns = selected_numeric + selected_categorical
+    
+    # Create preprocessing pipelines
+    numeric_transformer = Pipeline(steps=[
+        ('imputer', SimpleImputer(strategy='mean')),
+        ('scaler', StandardScaler())
+    ])
+    
+    categorical_transformer = Pipeline(steps=[
+        ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
+        ('onehot', OneHotEncoder(handle_unknown='ignore'))
+    ])
+    
+    # Create a ColumnTransformer for preprocessing
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', numeric_transformer, selected_numeric),
+            ('cat', categorical_transformer, selected_categorical)
+        ])
+    
+    # Fit and transform the data
+    X_preprocessed = preprocessor.fit_transform(df[selected_columns])
+    
+    # Get feature names after preprocessing
+    numeric_features = selected_numeric
+    categorical_features = preprocessor.named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(selected_categorical).tolist() if selected_categorical else []
+    feature_names = numeric_features + categorical_features
+    
+    return X_preprocessed, feature_names, preprocessor
+
+def perform_kmeans(X, n_clusters):
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    labels = kmeans.fit_predict(X)
+    return labels, kmeans
+
+def get_feature_importance(X, labels, feature_names):
+    importances = []
+    for feature_idx in range(X.shape[1]):
+        f_importances = []
+        for cluster in np.unique(labels):
+            f_imp = np.abs(np.mean(X[labels == cluster, feature_idx]) - np.mean(X[:, feature_idx]))
+            f_importances.append(f_imp)
+        importances.append(np.mean(f_importances))
+    
+    sorted_idx = np.argsort(importances)[::-1]
+    return [feature_names[i] for i in sorted_idx], np.array(importances)[sorted_idx]
+
 def elbow_method(X):
     wcss = []
     for i in range(1, 11):
@@ -59,7 +98,6 @@ def elbow_method(X):
     ax.set_ylabel('WCSS')
     return fig
 
-# Modified perform_clustering function
 def perform_clustering(X, algorithm, n_clusters=5):
     if algorithm == 'K-means':
         model = KMeans(n_clusters=n_clusters, random_state=42)
@@ -75,86 +113,204 @@ def perform_clustering(X, algorithm, n_clusters=5):
     labels = model.fit_predict(X)
     return labels, model
 
-# Function to plot clusters in 2D
 def plot_clusters_2d(X, labels, title):
-    pca = PCA(n_components=2)
-    X_pca = pca.fit_transform(X)
+    svd = TruncatedSVD(n_components=2, random_state=42)
+    X_2d = svd.fit_transform(X)
     
     fig, ax = plt.subplots(figsize=(10, 8))
-    scatter = ax.scatter(X_pca[:, 0], X_pca[:, 1], c=labels, cmap='viridis')
+    scatter = ax.scatter(X_2d[:, 0], X_2d[:, 1], c=labels, cmap='viridis')
     ax.set_title(title)
-    ax.set_xlabel('First Principal Component')
-    ax.set_ylabel('Second Principal Component')
+    ax.set_xlabel('First SVD Component')
+    ax.set_ylabel('Second SVD Component')
     plt.colorbar(scatter)
     return fig
 
-# Function to plot feature importance
+
 def plot_feature_importance(X, labels, feature_names, title):
-    importances = np.abs(np.mean(X[labels == 0], axis=0) - np.mean(X, axis=0))
-    indices = np.argsort(importances)[::-1]
+    if isinstance(X, np.ndarray):
+        importances = np.abs(np.mean(X[labels == 0], axis=0) - np.mean(X, axis=0))
+    else:  # Sparse matrix
+        importances = np.abs(X[labels == 0].mean(axis=0) - X.mean(axis=0)).A1
     
-    fig, ax = plt.subplots(figsize=(12, 8))
-    ax.bar(range(X.shape[1]), importances[indices])
-    ax.set_title(title)
-    ax.set_ylabel('Feature Importance')
-    ax.set_xticks(range(X.shape[1]))
-    ax.set_xticklabels([feature_names[i] for i in indices], rotation=90)
+    # Sort features by importance
+    sorted_idx = np.argsort(importances)[::-1]
+    sorted_features = [feature_names[i] for i in sorted_idx]
+    sorted_importances = importances[sorted_idx]
+    
+    # Create an interactive bar plot using Plotly
+    fig = go.Figure(go.Bar(
+        x=sorted_importances,
+        y=sorted_features,
+        orientation='h'
+    ))
+    
+    fig.update_layout(
+        title=title,
+        xaxis_title='Feature Importance',
+        yaxis_title='Features',
+        height=max(600, len(feature_names) * 20),  # Adjust height based on number of features
+        width=800
+    )
+    
+    return fig, sorted_features, sorted_importances
+
+
+def plot_top_features(df, top_features, cluster_column, agg_func, title):
+    df_agg = df.groupby(cluster_column)[top_features].agg(agg_func).reset_index()
+    df_melted = df_agg.melt(id_vars=[cluster_column], var_name='Feature', value_name='Value')
+    
+    fig = px.bar(df_melted, x='Feature', y='Value', color=cluster_column, barmode='group',
+                 title=f'{title} of Top 5 Features Across Clusters')
+    fig.update_layout(xaxis_title='Features', yaxis_title=f'{agg_func.capitalize()} Value', legend_title='Cluster')
+    
+    return fig
+
+def plot_top_features_by_cluster(X, labels, feature_names, top_n=5):
+    if isinstance(X, np.ndarray):
+        importances = np.abs(np.mean(X[labels == 0], axis=0) - np.mean(X, axis=0))
+    else:  # Sparse matrix
+        importances = np.abs(X[labels == 0].mean(axis=0) - X.mean(axis=0)).A1
+    
+    # Get top N features
+    top_indices = np.argsort(importances)[::-1][:top_n]
+    top_features = [feature_names[i] for i in top_indices]
+    
+    # Calculate mean values for each cluster
+    cluster_means = []
+    for cluster in np.unique(labels):
+        if isinstance(X, np.ndarray):
+            cluster_mean = np.mean(X[labels == cluster][:, top_indices], axis=0)
+        else:  # Sparse matrix
+            cluster_mean = X[labels == cluster][:, top_indices].mean(axis=0).A1
+        cluster_means.append(cluster_mean)
+    
+    # Create a DataFrame for plotting
+    df_plot = pd.DataFrame(cluster_means, columns=top_features)
+    df_plot['Cluster'] = [f'Cluster {i}' for i in range(len(cluster_means))]
+    df_melted = df_plot.melt(id_vars=['Cluster'], var_name='Feature', value_name='Value')
+    
+    # Create the bar plot
+    fig = px.bar(df_melted, x='Feature', y='Value', color='Cluster', barmode='group',
+                 title=f'Top {top_n} Features Comparison Across Clusters (Scaled)')
+    fig.update_layout(xaxis_title='Features', yaxis_title='Scaled Feature Value', legend_title='Cluster')
+    
+    return fig, top_indices, top_features
+
+def plot_top_features_by_cluster_original_scale(X, labels, feature_names, top_indices, preprocessor, df, selected_numeric, selected_date):
+    # Get the scaler for numeric features
+    numeric_scaler = preprocessor.named_transformers_['num'].named_steps['scaler'] if 'num' in preprocessor.named_transformers_ else None
+    
+    # Calculate mean values for each cluster
+    cluster_means = []
+    for cluster in np.unique(labels):
+        if isinstance(X, np.ndarray):
+            cluster_mean = np.mean(X[labels == cluster][:, top_indices], axis=0)
+        else:  # Sparse matrix
+            cluster_mean = X[labels == cluster][:, top_indices].mean(axis=0).A1
+        cluster_means.append(cluster_mean)
+    
+    # Create a DataFrame for plotting
+    df_plot = pd.DataFrame(cluster_means, columns=[feature_names[i] for i in top_indices])
+    
+    # Inverse transform the scaled values for numeric features
+    numeric_features = [f for f in df_plot.columns if f in selected_numeric]
+    if numeric_features and numeric_scaler:
+        numeric_indices = [list(feature_names).index(f) for f in numeric_features]
+        df_plot[numeric_features] = numeric_scaler.inverse_transform(df_plot[numeric_features])
+    
+    # Convert date features back to datetime
+    date_features = [f for f in df_plot.columns if f in selected_date]
+    for date_feature in date_features:
+        df_plot[date_feature] = pd.to_datetime(df_plot[date_feature] * 10**9)
+    
+    df_plot['Cluster'] = [f'Cluster {i}' for i in range(len(cluster_means))]
+    df_melted = df_plot.melt(id_vars=['Cluster'], var_name='Feature', value_name='Value')
+    
+    # Create the bar plot
+    fig = px.bar(df_melted, x='Feature', y='Value', color='Cluster', barmode='group',
+                 title=f'Top Features Comparison Across Clusters (Original Scale)')
+    fig.update_layout(xaxis_title='Features', yaxis_title='Original Feature Value', legend_title='Cluster')
+    
+    return fig
+
+
+def plot_feature_across_clusters(df, feature, cluster_column):
+    median_values = df.groupby(cluster_column)[feature].median().sort_values(ascending=False)
+    mean_values = df.groupby(cluster_column)[feature].mean().sort_values(ascending=False)
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        x=median_values.index,
+        y=median_values.values,
+        name='Median',
+        marker_color='blue'
+    ))
+    
+    fig.add_trace(go.Bar(
+        x=mean_values.index,
+        y=mean_values.values,
+        name='Mean',
+        marker_color='red'
+    ))
+    
+    fig.update_layout(
+        title=f'{feature} Across Clusters',
+        xaxis_title='Cluster',
+        yaxis_title='Value',
+        barmode='group'
+    )
     
     return fig
 
 def main():
-    st.title('Advanced Clustering Analysis')
+    st.title('Advanced Clustering Analysis for Buyer Personas')
     
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
     if uploaded_file is not None:
-        X, df, numeric_columns = load_and_preprocess_data(uploaded_file)
+        df, numeric_columns, categorical_columns = load_and_preprocess_data(uploaded_file)
         
-        if X is None:
+        if df is None:
             return  # Exit the function if data loading failed
         
-        st.write("Data Preview:")
-        st.write(df.head())
+        # Allow user to select columns for clustering
+        selected_numeric = st.multiselect("Select numeric columns for clustering", options=numeric_columns, default=numeric_columns)
+        selected_categorical = st.multiselect("Select categorical columns for clustering", options=categorical_columns, default=categorical_columns)
         
-        algorithm = st.selectbox(
-            "Select Clustering Algorithm",
-            ('K-means', 'Hierarchical', 'DBSCAN', 'GMM', 'Mean Shift')
-        )
+        if not (selected_numeric or selected_categorical):
+            st.error("Please select at least one column for clustering.")
+            return
         
-        if algorithm == 'K-means':
-            st.write("Elbow Method for K-means:")
-            elbow_fig = elbow_method(X)
-            st.pyplot(elbow_fig)
-            st.write("Use the Elbow Method graph to choose the optimal number of clusters where the 'elbow' occurs.")
+        X_preprocessed, feature_names, preprocessor = preprocess_data(df, selected_numeric, selected_categorical)
         
-        if algorithm in ['K-means', 'Hierarchical', 'GMM']:
-            n_clusters = st.slider("Number of Clusters", 2, 10, 5)
-        else:
-            n_clusters = None
+        n_clusters = st.slider("Number of Clusters", 2, 10, 5)
         
         if st.button('Run Clustering Analysis'):
-            labels, model = perform_clustering(X, algorithm, n_clusters)
+            labels, kmeans = perform_kmeans(X_preprocessed, n_clusters)
             
-            st.write(f"\n{algorithm} Clustering Results:")
+            # Add cluster labels to the original dataframe
+            df['k_means_cluster'] = labels
             
-            # 2D visualization of clusters
-            fig_clusters = plot_clusters_2d(X, labels, f'{algorithm} Clustering')
-            st.pyplot(fig_clusters)
-            st.write("This plot shows how the data points are grouped into clusters. " 
-                     "Each color represents a different cluster.")
+            st.write("\nK-means Clustering Results:")
             
-            # Feature importance plot
-            fig_importance = plot_feature_importance(X, labels, numeric_columns, f'Feature Importance for {algorithm}')
-            st.pyplot(fig_importance)
-            st.write("This plot shows which features are most important in determining the clusters. " 
-                     "Taller bars indicate more important features.")
+            # Get feature importance
+            top_features, importances = get_feature_importance(X_preprocessed, labels, feature_names)
             
-            # Cluster statistics
-            st.write("\nCluster Statistics:")
-            for cluster in np.unique(labels):
-                st.write(f"Cluster {cluster}:")
-                cluster_data = df[labels == cluster]
-                st.write(cluster_data.describe())
-                st.write("---")
+            # Plot top 5 feature importances
+            fig_importance = px.bar(x=top_features[:5], y=importances[:5], 
+                                    labels={'x': 'Features', 'y': 'Importance'},
+                                    title='Top 5 Feature Importances')
+            st.plotly_chart(fig_importance)
+            
+            # Plot individual charts for top 5 features
+            st.write("### Individual Feature Analysis")
+            for feature in top_features[:5]:
+                if feature in df.columns:  # Check if the feature is in the original dataframe
+                    fig = plot_feature_across_clusters(df, feature, 'k_means_cluster')
+                    st.plotly_chart(fig)
+                else:
+                    st.write(f"Feature '{feature}' not found in the original dataset. It might be an encoded categorical feature.")
+            
 
 if __name__ == "__main__":
     main()
