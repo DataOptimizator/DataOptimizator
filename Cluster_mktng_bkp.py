@@ -5,14 +5,13 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder, FunctionTransfo
 from sklearn.impute import SimpleImputer
 from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN, MeanShift
 from sklearn.mixture import GaussianMixture
-from sklearn.decomposition import TruncatedSVD
+from sklearn.decomposition import TruncatedSVD, PCA
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.graph_objs as go
 import plotly.express as px
-
 
 @st.cache_data
 def load_and_preprocess_data(file):
@@ -263,6 +262,36 @@ def plot_feature_across_clusters(df, feature, cluster_column):
     
     return fig
 
+def plot_2d_kmeans(X, labels, n_clusters):
+    # Perform PCA to reduce to 2 dimensions
+    pca = PCA(n_components=2)
+    X_pca = pca.fit_transform(X)
+    
+    # Create a DataFrame for plotting
+    df_plot = pd.DataFrame({
+        'PC1': X_pca[:, 0],
+        'PC2': X_pca[:, 1],
+        'Cluster': labels
+    })
+    
+    # Calculate cluster centers
+    kmeans = KMeans(n_clusters=n_clusters)
+    kmeans.fit(X_pca)
+    centers = kmeans.cluster_centers_
+    
+    # Create the scatter plot
+    fig = px.scatter(df_plot, x='PC1', y='PC2', color='Cluster', 
+                     title='2D Visualization of K-means Clustering')
+    
+    # Add cluster centers to the plot
+    fig.add_trace(go.Scatter(x=centers[:, 0], y=centers[:, 1],
+                             mode='markers',
+                             marker=dict(color='black', size=10, symbol='x'),
+                             name='Cluster Centers'))
+    
+    fig.update_layout(legend_title_text='Cluster')
+    return fig
+
 def main():
     st.title('Advanced Clustering Analysis for Buyer Personas')
     
@@ -293,6 +322,13 @@ def main():
             
             st.write("\nK-means Clustering Results:")
             
+            # Plot 2D visualization of K-means clustering
+            fig_2d_kmeans = plot_2d_kmeans(X_preprocessed, labels, n_clusters)
+            st.plotly_chart(fig_2d_kmeans)
+            st.write("This plot shows a 2D representation of the clustering results. " 
+                     "Each point represents a data point, colored by its assigned cluster. "
+                     "The black X markers represent the cluster centers.")
+            
             # Get feature importance
             top_features, importances = get_feature_importance(X_preprocessed, labels, feature_names)
             
@@ -311,6 +347,19 @@ def main():
                 else:
                     st.write(f"Feature '{feature}' not found in the original dataset. It might be an encoded categorical feature.")
             
+            # Buyer Persona Analysis
+            st.write("\n### Buyer Persona Analysis:")
+            for cluster in range(n_clusters):
+                st.write(f"Cluster {cluster}:")
+                cluster_data = df[df['k_means_cluster'] == cluster]
+                
+                for col in selected_numeric + selected_categorical:
+                    if df[col].dtype in ['int64', 'float64']:
+                        st.write(f"{col}: Mean = {cluster_data[col].mean():.2f}, Median = {cluster_data[col].median():.2f}")
+                    else:
+                        st.write(f"{col}: Most common = {cluster_data[col].mode().values[0]}")
+                
+                st.write("---")
 
 if __name__ == "__main__":
     main()
